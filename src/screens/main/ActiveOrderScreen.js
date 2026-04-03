@@ -1,0 +1,443 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Alert,
+  ActivityIndicator,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRoute, useNavigation } from '@react-navigation/native';
+import Header from '../../components/common/Header';
+import Button from '../../components/common/Button';
+import Card from '../../components/common/Card';
+import LoadingOverlay from '../../components/common/LoadingOverlay';
+import OrderStatusBadge from '../../components/orders/OrderStatusBadge';
+import { updateOrderStatus, startDelivery, completeOrder } from '../../api/orders';
+import { emitEvent, getSocket } from '../../api/socket';
+import useLocation from '../../hooks/useLocation';
+import { colors } from '../../styles/colors';
+import { typography } from '../../styles/typography';
+import { globalStyles } from '../../styles/globalStyles';
+import { ORDER_STATUS, ORDER_STATUS_AR } from '../../utils/constants';
+
+export default function ActiveOrderScreen() {
+  const route = useRoute();
+  const navigation = useNavigation();
+  const [order, setOrder] = useState(route?.params?.order || null);
+  const [loading, setLoading] = useState(false);
+  const [currentStatus, setCurrentStatus] = useState(order?.status || ORDER_STATUS.PENDING);
+  const { updateLocationToServer } = useLocation(true, 5000);
+
+  const statusSteps = [
+    ORDER_STATUS.PENDING,
+    ORDER_STATUS.ACCEPTED,
+    ORDER_STATUS.READY,
+    ORDER_STATUS.PICKED,
+    ORDER_STATUS.DELIVERED,
+  ];
+  const currentStepIndex = statusSteps.indexOf(currentStatus);
+
+  const updateStatus = async (newStatus) => {
+    setLoading(true);
+    
+    await updateLocationToServer();
+    
+    const result = await updateOrderStatus(order.id, newStatus);
+    
+    if (result.success) {
+      setCurrentStatus(newStatus);
+      
+      const socket = getSocket();
+      if (socket) {
+        emitEvent('driver:status-update', {
+          orderId: order.id,
+          status: newStatus,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      
+      if (newStatus === ORDER_STATUS.DELIVERED) {
+        await completeOrder(order.id);
+        Alert.alert('نجاح', 'تم تسليم الطلب بنجاح');
+        navigation.goBack();
+      } else {
+        Alert.alert('تم', 'تم تحديث حالة الطلب');
+      }
+    } else {
+      Alert.alert('خطأ', result.message);
+    }
+    
+    setLoading(false);
+  };
+
+  const handleStartDelivery = async () => {
+    setLoading(true);
+    const result = await startDelivery(order.id);
+    setLoading(false);
+    
+    if (result.success) {
+      setCurrentStatus(ORDER_STATUS.PICKED);
+      Alert.alert('نجاح', 'تم بدء التوصيل');
+    } else {
+      Alert.alert('خطأ', result.message);
+    }
+  };
+
+  const handleCancelOrder = () => {
+    Alert.alert(
+      'إلغاء الطلب',
+      'هل أنت متأكد من إلغاء هذا الطلب؟',
+      [
+        { text: 'لا', style: 'cancel' },
+        {
+          text: 'نعم، إلغاء',
+          onPress: async () => {
+            setLoading(true);
+            const result = await updateOrderStatus(order.id, ORDER_STATUS.CANCELLED);
+            setLoading(false);
+            if (result.success) {
+              Alert.alert('تم', 'تم إلغاء الطلب');
+              navigation.goBack();
+            } else {
+              Alert.alert('خطأ', result.message);
+            }
+          },
+          style: 'destructive'
+        }
+      ]
+    );
+  };
+
+  const getNextAction = () => {
+    switch (currentStatus) {
+      case ORDER_STATUS.PENDING:
+        return { title: 'قبول الطلب', action: () => updateStatus(ORDER_STATUS.ACCEPTED) };
+      case ORDER_STATUS.ACCEPTED:
+        return { title: 'جاهز للتوصيل', action: () => updateStatus(ORDER_STATUS.READY) };
+      case ORDER_STATUS.READY:
+        return { title: 'بدأ التوصيل', action: handleStartDelivery };
+      case ORDER_STATUS.PICKED:
+        return { title: 'تم التوصيل', action: () => updateStatus(ORDER_STATUS.DELIVERED) };
+      default:
+        return null;
+    }
+  };
+
+  if (!order) {
+    return (
+      <SafeAreaView style={globalStyles.safeArea}>
+        <Header title="الطلب الحالي" showBack />
+        <View style={globalStyles.emptyContainer}>
+          <Text style={styles.emptyEmoji}>🚚</Text>
+          <Text style={globalStyles.emptyText}>لا يوجد طلب نشط حالياً</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const nextAction = getNextAction();
+  const isCompleted = currentStatus === ORDER_STATUS.DELIVERED;
+  const isCancelled = currentStatus === ORDER_STATUS.CANCELLED;
+
+  return (
+    <SafeAreaView style={globalStyles.safeArea}>
+      <LoadingOverlay visible={loading} message="جاري التحديث..." />
+      <Header title="الطلب الحالي" showBack />
+      
+      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+        <Card style={styles.card}>
+          {/* رأس الطلب */}
+          <View style={styles.header}>
+            <Text style={styles.orderId}>طلب #{order.id?.slice(-8)}</Text>
+            <OrderStatusBadge status={currentStatus} />
+          </View>
+          
+          <Text style={styles.storeName}>{order.store?.name}</Text>
+          
+          {/* السعر */}
+          <View style={styles.priceContainer}>
+            <Text style={styles.totalPrice}>{order.totalPrice} د.ع</Text>
+          </View>
+          
+          {/* شريط التقدم */}
+          <View style={styles.progressContainer}>
+            <View style={styles.progressBar}>
+              <View 
+                style={[
+                  styles.progressFill, 
+                  { width: `${(currentStepIndex / (statusSteps.length - 1)) * 100}%` }
+                ]} 
+              />
+            </View>
+            <View style={styles.stepsContainer}>
+              {statusSteps.map((step, index) => (
+                <View key={step} style={styles.stepWrapper}>
+                  <View 
+                    style={[
+                      styles.stepDot,
+                      index <= currentStepIndex && styles.stepDotActive,
+                      index === currentStepIndex && styles.stepDotCurrent,
+                    ]} 
+                  />
+                  <Text 
+                    style={[
+                      styles.stepLabel,
+                      index <= currentStepIndex && styles.stepLabelActive,
+                    ]}
+                  >
+                    {ORDER_STATUS_AR[step]}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
+          
+          {/* عنوان التوصيل */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>📍 عنوان التوصيل</Text>
+            <Text style={styles.addressText}>
+              {order.deliveryAddress?.addressLine || 'عنوان غير متوفر'}
+            </Text>
+            {order.deliveryAddress?.city && (
+              <Text style={styles.cityText}>{order.deliveryAddress.city}</Text>
+            )}
+          </View>
+          
+          {/* المنتجات */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>🛍️ المنتجات</Text>
+            {order.items?.map((item, index) => (
+              <View key={index} style={styles.itemRow}>
+                <Text style={styles.itemName}>{item.name}</Text>
+                <Text style={styles.itemQuantity}>x{item.qty}</Text>
+                <Text style={styles.itemPrice}>{item.price} د.ع</Text>
+              </View>
+            ))}
+          </View>
+          
+          {/* ملاحظات */}
+          {order.notes && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>📝 ملاحظات</Text>
+              <Text style={styles.notesText}>{order.notes}</Text>
+            </View>
+          )}
+          
+          {/* الأزرار */}
+          <View style={styles.buttonContainer}>
+            {nextAction && !isCompleted && !isCancelled && (
+              <Button
+                title={nextAction.title}
+                onPress={nextAction.action}
+                size="large"
+                fullWidth
+                loading={loading}
+              />
+            )}
+            
+            {!isCompleted && !isCancelled && (
+              <Button
+                title="إلغاء الطلب"
+                onPress={handleCancelOrder}
+                variant="danger"
+                size="large"
+                fullWidth
+                style={styles.cancelButton}
+                loading={loading}
+              />
+            )}
+            
+            {isCompleted && (
+              <View style={styles.completedContainer}>
+                <Text style={styles.completedText}>✓ تم تسليم الطلب بنجاح</Text>
+                <Button
+                  title="العودة للطلبات"
+                  onPress={() => navigation.goBack()}
+                  variant="primary"
+                  size="large"
+                  fullWidth
+                />
+              </View>
+            )}
+            
+            {isCancelled && (
+              <View style={styles.completedContainer}>
+                <Text style={styles.cancelledText}>✗ تم إلغاء الطلب</Text>
+                <Button
+                  title="العودة للطلبات"
+                  onPress={() => navigation.goBack()}
+                  variant="primary"
+                  size="large"
+                  fullWidth
+                />
+              </View>
+            )}
+          </View>
+        </Card>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  card: {
+    margin: 16,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  orderId: {
+    fontSize: typography.caption,
+    color: colors.textSecondary,
+  },
+  storeName: {
+    fontSize: typography.h4,
+    fontWeight: typography.bold,
+    color: colors.text,
+    marginBottom: 12,
+  },
+  priceContainer: {
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  totalPrice: {
+    fontSize: typography.h2,
+    fontWeight: typography.bold,
+    color: colors.success,
+  },
+  progressContainer: {
+    marginBottom: 24,
+  },
+  progressBar: {
+    height: 4,
+    backgroundColor: colors.divider,
+    borderRadius: 2,
+    marginBottom: 16,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 2,
+  },
+  stepsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  stepWrapper: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  stepDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.divider,
+    marginBottom: 6,
+  },
+  stepDotActive: {
+    backgroundColor: colors.success,
+  },
+  stepDotCurrent: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: colors.primary,
+    borderWidth: 2,
+    borderColor: colors.primaryLight,
+  },
+  stepLabel: {
+    fontSize: typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  stepLabelActive: {
+    color: colors.primary,
+    fontWeight: typography.bold,
+  },
+  section: {
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  sectionTitle: {
+    fontSize: typography.body1,
+    fontWeight: typography.bold,
+    color: colors.text,
+    marginBottom: 12,
+  },
+  addressText: {
+    fontSize: typography.body2,
+    color: colors.text,
+    marginBottom: 4,
+  },
+  cityText: {
+    fontSize: typography.caption,
+    color: colors.textSecondary,
+  },
+  itemRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  itemName: {
+    fontSize: typography.body2,
+    color: colors.text,
+    flex: 2,
+  },
+  itemQuantity: {
+    fontSize: typography.body2,
+    color: colors.textSecondary,
+    width: 50,
+    textAlign: 'center',
+  },
+  itemPrice: {
+    fontSize: typography.body2,
+    color: colors.success,
+    width: 70,
+    textAlign: 'right',
+  },
+  notesText: {
+    fontSize: typography.body2,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+  },
+  buttonContainer: {
+    marginTop: 8,
+  },
+  cancelButton: {
+    marginTop: 12,
+  },
+  completedContainer: {
+    alignItems: 'center',
+  },
+  completedText: {
+    fontSize: typography.h5,
+    fontWeight: typography.bold,
+    color: colors.success,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  cancelledText: {
+    fontSize: typography.h5,
+    fontWeight: typography.bold,
+    color: colors.danger,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  emptyEmoji: {
+    fontSize: 64,
+    marginBottom: 16,
+  },
+});
