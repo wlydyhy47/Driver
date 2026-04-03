@@ -70,4 +70,4 @@ const styles = StyleSheet.create({
   otherTime: {
     color: colors.textSecondary,
   },
-});
+}); 
