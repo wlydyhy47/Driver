@@ -1,109 +1,168 @@
-import { useEffect, useRef } from 'react';
-import * as Location from 'expo-location';
-import { updateDriverLocation, getCurrentLocation } from '../api/location';
-import { getSocket, onEvent, offEvent } from '../api/socket';
-
-let locationInterval = null;
+// src/hooks/useLocation.js (النسخة المحسنة)
+import { useEffect, useRef, useState, useCallback } from 'react';
+import LocationService from '../api/location';
+import { getSocket, emitEvent, onEvent, offEvent } from '../api/socket';
 
 export const useLocation = (isOnline = true, updateInterval = 10000) => {
+  const [currentLocation, setCurrentLocation] = useState(null);
+  const [isTracking, setIsTracking] = useState(false);
+  const [error, setError] = useState(null);
+  const intervalRef = useRef(null);
   const socketRef = useRef(null);
 
-  // بدء تتبع الموقع وتحديثه للخادم
-  const startLocationTracking = async () => {
-    if (!isOnline) return;
+  // تحديث الموقع إلى الخادم
+  const updateLocation = useCallback(async () => {
+    if (!isOnline) return null;
+    
+    const result = await LocationService.updateLocationToServer();
+    
+    if (result.success) {
+      setCurrentLocation({
+        latitude: result.data?.data?.latitude,
+        longitude: result.data?.data?.longitude,
+        timestamp: new Date()
+      });
+      
+      // إرسال عبر Socket للتحديث المباشر
+      const socket = getSocket();
+      if (socket && socket.connected) {
+        emitEvent('driver:location:updated', {
+          latitude: result.data?.data?.latitude,
+          longitude: result.data?.data?.longitude,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      return result;
+    } else {
+      setError(result.message);
+      return null;
+    }
+  }, [isOnline]);
 
-    // طلب صلاحيات الموقع
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      console.log('Permission to access location was denied');
+  // بدء تتبع الموقع
+  const startTracking = useCallback(async () => {
+    if (!isOnline) {
+      console.log('Driver is offline, not starting tracking');
       return;
     }
-
-    // تحديث الموقع فوراً
-    await updateLocationToServer();
-
-    // تحديث الموقع كل فترة زمنية
-    if (locationInterval) {
-      clearInterval(locationInterval);
+    
+    if (isTracking) {
+      console.log('Tracking already started');
+      return;
     }
-
-    locationInterval = setInterval(async () => {
-      await updateLocationToServer();
+    
+    setError(null);
+    setIsTracking(true);
+    
+    // تحديث فوري
+    await updateLocation();
+    
+    // بدء التتبع الدوري
+    intervalRef.current = setInterval(async () => {
+      await updateLocation();
     }, updateInterval);
-  };
+    
+    console.log('Location tracking started');
+  }, [isOnline, isTracking, updateLocation, updateInterval]);
 
-  // تحديث الموقع إلى الخادم
-  const updateLocationToServer = async () => {
-    try {
-      const location = await getCurrentLocation();
-      if (location.success) {
-        await updateDriverLocation(location.latitude, location.longitude);
-        
-        // إرسال الموقع عبر Socket للتحديث المباشر
-        const socket = getSocket();
-        if (socket && socket.connected) {
-          socket.emit('driver:location', {
-            latitude: location.latitude,
-            longitude: location.longitude,
-            timestamp: new Date().toISOString(),
-          });
-        }
+  // إيقاف تتبع الموقع
+  const stopTracking = useCallback(async () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    
+    await LocationService.stopTracking();
+    setIsTracking(false);
+    console.log('Location tracking stopped');
+  }, []);
+
+  // تحديث حالة الاتصال (متصل/غير متصل)
+  const updateOnlineStatus = useCallback(async (isOnlineStatus) => {
+    const result = await LocationService.updateOnlineStatus(isOnlineStatus);
+    if (result.success) {
+      if (isOnlineStatus) {
+        await startTracking();
+      } else {
+        await stopTracking();
       }
-    } catch (error) {
-      console.log('Error updating location:', error);
     }
-  };
-
-  // إيقاف التتبع
-  const stopLocationTracking = () => {
-    if (locationInterval) {
-      clearInterval(locationInterval);
-      locationInterval = null;
-    }
-  };
+    return result;
+  }, [startTracking, stopTracking]);
 
   // الاستماع لأوامر الطلب من السيرفر
-  const setupSocketListeners = () => {
+  const setupSocketListeners = useCallback(() => {
     const socket = getSocket();
     if (!socket) return;
-
-    // طلب جديد للمندوب
+    
+    socketRef.current = socket;
+    
+    // ✅ استخدام أسماء الأحداث المتوافقة مع الـ Backend
     onEvent('driver:new-order', (data) => {
-      console.log('New order received:', data);
+      console.log('📦 New order received:', data);
       // يمكنك إرسال إشعار محلي هنا
     });
-
-    // تحديث حالة الطلب
-    onEvent('driver:order-updated', (data) => {
-      console.log('Order updated:', data);
+    
+    onEvent('order:status:updated', (data) => {
+      console.log('🔄 Order status updated:', data);
     });
-
-    // رسالة جديدة في الدردشة
-    onEvent('driver:new-message', (data) => {
-      console.log('New message received:', data);
-    });
-
-    // طلب إلغاء
+    
     onEvent('driver:order-cancelled', (data) => {
-      console.log('Order cancelled:', data);
+      console.log('❌ Order cancelled:', data);
     });
-  };
+    
+    onEvent('driver:location:request', (data) => {
+      console.log('📍 Location requested:', data);
+      updateLocation();
+    });
+    
+    onEvent('driver:delivery:started', (data) => {
+      console.log('🚚 Delivery started:', data);
+    });
+    
+    onEvent('driver:delivery:completed', (data) => {
+      console.log('✅ Delivery completed:', data);
+    });
+    
+    onEvent('chat:message:new', (data) => {
+      console.log('💬 New message received:', data);
+    });
+  }, [updateLocation]);
+
+  // تنظيف المستمعين
+  const cleanupSocketListeners = useCallback(() => {
+    if (!socketRef.current) return;
+    
+    offEvent('driver:new-order');
+    offEvent('order:status:updated');
+    offEvent('driver:order-cancelled');
+    offEvent('driver:location:request');
+    offEvent('driver:delivery:started');
+    offEvent('driver:delivery:completed');
+    offEvent('chat:message:new');
+  }, []);
 
   useEffect(() => {
     if (isOnline) {
-      startLocationTracking();
+      startTracking();
       setupSocketListeners();
     }
-
+    
     return () => {
-      stopLocationTracking();
+      stopTracking();
+      cleanupSocketListeners();
     };
-  }, [isOnline]);
+  }, [isOnline, startTracking, stopTracking, setupSocketListeners, cleanupSocketListeners]);
 
   return {
-    startLocationTracking,
-    stopLocationTracking,
-    updateLocationToServer,
+    currentLocation,
+    isTracking,
+    error,
+    startTracking,
+    stopTracking,
+    updateLocation,
+    updateOnlineStatus
   };
 };
 

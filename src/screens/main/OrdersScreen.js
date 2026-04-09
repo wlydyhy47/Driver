@@ -179,7 +179,7 @@ export default function OrdersScreen() {
         color={isOnline ? colors.primary : colors.textDisabled} 
       />
       <Text style={[globalStyles.emptyText, { fontSize: 18, fontWeight: 'bold', marginTop: 20 }]}>
-        {isOnline ? '✨ جاهز للاستلام ✨' : '⛔ غير متاح حالياً ⛔'}
+        {isOnline ? '✨ جاهز للاستلام ✨' : 'ليسى هناك طلب '}
       </Text>
       <Text style={styles.emptySubtext}>
         {isOnline 
